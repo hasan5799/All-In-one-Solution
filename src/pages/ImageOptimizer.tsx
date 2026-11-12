@@ -161,6 +161,8 @@ export default function ImageOptimizer() {
   const [quality, setQuality] = useState(80);
   const [outputFormat, setOutputFormat] = useState("webp");
   const [maxWidth, setMaxWidth] = useState<number | "original">("original");
+  const [isCustomWidth, setIsCustomWidth] = useState(false);
+  const [customWidthValue, setCustomWidthValue] = useState("1200");
   const [processing, setProcessing] = useState(false);
   const ffmpegRef = useRef<FFmpeg | null>(null);
   const cleanupTimeoutsRef = useRef<Record<string, number>>({});
@@ -857,12 +859,44 @@ export default function ImageOptimizer() {
                   Resolution / Width
                 </label>
                 <span className="text-xs text-primary font-mono font-medium">
-                  {maxWidth === "original" ? "Original" : `${maxWidth}px`}
+                  {isCustomWidth
+                    ? `${maxWidth}px (Custom)`
+                    : maxWidth === "original"
+                      ? "Original"
+                      : `${maxWidth}px`}
                 </span>
               </div>
               <div className="grid grid-cols-3 gap-1.5 mt-2">
+                <button
+                  type="button"
+                  onClick={() => {
+                    setIsCustomWidth(false);
+                    setMaxWidth("original");
+                  }}
+                  className={`px-2 py-1.5 rounded-md text-xs font-medium transition-colors border ${
+                    !isCustomWidth && maxWidth === "original"
+                      ? "bg-primary text-primary-foreground border-primary shadow-sm"
+                      : "bg-secondary text-secondary-foreground border-border/60 hover:bg-secondary/80"
+                  }`}
+                >
+                  Original
+                </button>
+                <button
+                  type="button"
+                  onClick={() => {
+                    setIsCustomWidth(true);
+                    const num = parseInt(customWidthValue, 10) || 1200;
+                    setMaxWidth(num);
+                  }}
+                  className={`px-2 py-1.5 rounded-md text-xs font-medium transition-colors border ${
+                    isCustomWidth
+                      ? "bg-primary text-primary-foreground border-primary shadow-sm"
+                      : "bg-secondary text-secondary-foreground border-border/60 hover:bg-secondary/80"
+                  }`}
+                >
+                  Custom
+                </button>
                 {[
-                  { label: "Original", value: "original" },
                   { label: "2560px", value: 2560 },
                   { label: "1920px", value: 1920 },
                   { label: "1000px", value: 1000 },
@@ -872,9 +906,12 @@ export default function ImageOptimizer() {
                   <button
                     key={res.label}
                     type="button"
-                    onClick={() => setMaxWidth(res.value as number | "original")}
+                    onClick={() => {
+                      setIsCustomWidth(false);
+                      setMaxWidth(res.value);
+                    }}
                     className={`px-2 py-1.5 rounded-md text-xs font-medium transition-colors border ${
-                      maxWidth === res.value
+                      !isCustomWidth && maxWidth === res.value
                         ? "bg-primary text-primary-foreground border-primary shadow-sm"
                         : "bg-secondary text-secondary-foreground border-border/60 hover:bg-secondary/80"
                     }`}
@@ -883,6 +920,42 @@ export default function ImageOptimizer() {
                   </button>
                 ))}
               </div>
+
+              {isCustomWidth && (
+                <div className="mt-2.5 p-2.5 rounded-lg bg-secondary/50 border border-border/60 space-y-1.5">
+                  <div className="flex items-center justify-between text-xs">
+                    <label htmlFor="custom-width-input" className="font-medium text-card-foreground">
+                      Enter Width (px):
+                    </label>
+                    <span className="text-[11px] text-muted-foreground font-mono">
+                      Dynamic ratio height
+                    </span>
+                  </div>
+                  <div className="relative">
+                    <input
+                      id="custom-width-input"
+                      type="number"
+                      min={10}
+                      max={10000}
+                      value={customWidthValue}
+                      onChange={(e) => {
+                        const val = e.target.value;
+                        setCustomWidthValue(val);
+                        const num = parseInt(val, 10);
+                        if (num > 0) {
+                          setMaxWidth(num);
+                        }
+                      }}
+                      placeholder="e.g. 1200"
+                      className="w-full h-8 px-3 pr-8 text-xs font-mono font-medium rounded-md border border-border bg-background focus:ring-1 focus:ring-primary focus:border-primary outline-none"
+                    />
+                    <span className="absolute right-3 top-1/2 -translate-y-1/2 text-xs text-muted-foreground pointer-events-none">
+                      px
+                    </span>
+                  </div>
+                </div>
+              )}
+
               <div className="flex items-center justify-between text-[11px] text-muted-foreground mt-2 px-0.5">
                 <span>Dynamic Height:</span>
                 <span className="font-mono text-primary font-medium">
