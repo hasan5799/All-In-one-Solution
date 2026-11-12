@@ -442,6 +442,9 @@ export default function ImageOptimizer() {
 
         canvas.toBlob(
           (blob) => {
+            // Immediately reclaim canvas backing store memory
+            canvas.width = 0;
+            canvas.height = 0;
             if (!blob) {
               resolve(null);
               return;
