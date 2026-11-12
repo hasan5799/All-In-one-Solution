@@ -212,7 +212,7 @@ export default function ImageResizer() {
                     variant="outline"
                     size="sm"
                     onClick={() => window.location.reload()}
-                    className="self-start sm:self-auto gap-2 text-xs font-medium border-border hover:bg-secondary transition-colors shadow-sm"
+                    className="self-start sm:self-auto gap-2 text-xs font-medium border-border text-foreground hover:bg-primary hover:text-primary-foreground hover:border-primary transition-all shadow-sm"
                     title="Reload Page"
                 >
                     <RefreshCw className="h-3.5 w-3.5" />

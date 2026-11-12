@@ -163,6 +163,8 @@ export default function ImageOptimizer() {
   const [maxWidth, setMaxWidth] = useState<number | "original">("original");
   const [isCustomWidth, setIsCustomWidth] = useState(false);
   const [customWidthValue, setCustomWidthValue] = useState("1200");
+  const [currentPage, setCurrentPage] = useState(1);
+  const [pageSize, setPageSize] = useState<number | "all">(30);
   const [processing, setProcessing] = useState(false);
   const ffmpegRef = useRef<FFmpeg | null>(null);
   const cleanupTimeoutsRef = useRef<Record<string, number>>({});
@@ -179,7 +181,7 @@ export default function ImageOptimizer() {
     return ffmpeg;
   };
 
-  const handleFiles = useCallback(async (newFiles: File[]) => {
+  const handleFiles = useCallback((newFiles: File[]) => {
     // Extensive list of image formats including PSD
     const supportedExts = ['.jpg', '.jpeg', '.png', '.webp', '.psd', '.tiff', '.tif', '.heic', '.heif', '.bmp', '.gif', '.svg', '.avif'];
     const imageFiles = newFiles.filter((f) => {
@@ -191,67 +193,85 @@ export default function ImageOptimizer() {
       toast.warning(`${newFiles.length - imageFiles.length} file(s) skipped (unsupported format)`);
     }
 
+    if (!imageFiles.length) return;
+
     const supabaseConfig = getSupabaseTempConfig();
     const shouldUseSupabase = shouldUseSupabaseTempUpload(supabaseConfig);
     const userId = getCurrentUserId();
-    let supabaseUploadFailedCount = 0;
 
-    const mapped: ImageFile[] = await mapConcurrently(imageFiles, 3, async (f) => {
-      const fileId = crypto.randomUUID();
-      const lowerName = f.name.toLowerCase();
-      const ext = `.${lowerName.split(".").pop() || ""}`;
-      const isPsdOrTiff = [".psd", ".tiff", ".tif"].includes(ext);
+    // STEP 1: Immediately create entry for all dropped files in 0.01s so the UI never hangs
+    const initialItems: ImageFile[] = imageFiles.map((f) => ({
+      id: crypto.randomUUID(),
+      file: f,
+      preview: "",
+      status: "pending",
+    }));
 
-      let preview = "";
-      let originalWidth: number | undefined;
-      let originalHeight: number | undefined;
+    setFiles((prev) => [...prev, ...initialItems]);
 
-      // Extract dimensions and generate a lightweight 160px thumbnail (WebP)
-      // to avoid storing huge 20-50 Megapixel uncompressed bitmaps in GPU memory
-      if (!isPsdOrTiff) {
-        try {
-          const thumb = await createImageThumbnail(f, 160);
-          preview = thumb.preview;
-          originalWidth = thumb.width;
-          originalHeight = thumb.height;
-        } catch {
-          // fallback gracefully
-        }
-      }
+    // STEP 2: Progressive background thumbnail generation (2 items at a time, micro-yielded)
+    // Runs in the background without blocking the UI thread or drop interaction
+    (async () => {
+      let supabaseUploadFailedCount = 0;
+      for (const item of initialItems) {
+        const lowerName = item.file.name.toLowerCase();
+        const ext = `.${lowerName.split(".").pop() || ""}`;
+        const isPsdOrTiff = [".psd", ".tiff", ".tif"].includes(ext);
 
-      let supabasePath: string | undefined;
-      let supabaseSignedUrl: string | undefined;
+        let preview = "";
+        let originalWidth: number | undefined;
+        let originalHeight: number | undefined;
+        let supabasePath: string | undefined;
+        let supabaseSignedUrl: string | undefined;
 
-      if (shouldUseSupabase) {
-        try {
-          const uploaded = await uploadTempFileToSupabase(f, userId);
-          if (uploaded) {
-            supabasePath = uploaded.path;
-            supabaseSignedUrl = uploaded.signedUrl;
-            if (!preview) preview = uploaded.signedUrl;
+        if (!isPsdOrTiff) {
+          try {
+            const thumb = await createImageThumbnail(item.file, 160);
+            preview = thumb.preview;
+            originalWidth = thumb.width;
+            originalHeight = thumb.height;
+          } catch {
+            // fallback gracefully
           }
-        } catch {
-          supabaseUploadFailedCount += 1;
         }
+
+        if (shouldUseSupabase) {
+          try {
+            const uploaded = await uploadTempFileToSupabase(item.file, userId);
+            if (uploaded) {
+              supabasePath = uploaded.path;
+              supabaseSignedUrl = uploaded.signedUrl;
+              if (!preview) preview = uploaded.signedUrl;
+            }
+          } catch {
+            supabaseUploadFailedCount++;
+          }
+        }
+
+        // Incrementally update this item in state
+        setFiles((prev) =>
+          prev.map((x) =>
+            x.id === item.id
+              ? {
+                  ...x,
+                  preview: preview || x.preview,
+                  originalWidth: originalWidth ?? x.originalWidth,
+                  originalHeight: originalHeight ?? x.originalHeight,
+                  supabasePath: supabasePath || x.supabasePath,
+                  supabaseSignedUrl: supabaseSignedUrl || x.supabaseSignedUrl,
+                }
+              : x
+          )
+        );
+
+        // Yield to browser event loop
+        await new Promise((r) => setTimeout(r, 6));
       }
 
-      return {
-        id: fileId,
-        file: f,
-        preview,
-        originalWidth,
-        originalHeight,
-        supabasePath,
-        supabaseSignedUrl,
-        status: "pending",
-      };
-    });
-
-    if (shouldUseSupabase && supabaseUploadFailedCount > 0) {
-      toast.warning(`${supabaseUploadFailedCount} file(s) could not be uploaded to Supabase, local fallback used`);
-    }
-
-    setFiles((prev) => [...prev, ...mapped]);
+      if (shouldUseSupabase && supabaseUploadFailedCount > 0) {
+        toast.warning(`${supabaseUploadFailedCount} file(s) could not be uploaded to Supabase, local fallback used`);
+      }
+    })();
   }, []);
 
   const removeFile = (id: string) => {
@@ -678,6 +698,9 @@ export default function ImageOptimizer() {
           url: result.optimized,
         });
       }
+
+      // Micro-yield to allow browser rendering and GC memory cleanup
+      await new Promise((r) => setTimeout(r, 20));
     }
 
     setProcessing(false);
@@ -743,6 +766,9 @@ export default function ImageOptimizer() {
           url: result.optimized,
         });
       }
+
+      // Micro-yield to allow browser rendering and GC memory cleanup
+      await new Promise((r) => setTimeout(r, 20));
     }
     setProcessing(false);
     const successCount = currentFiles.filter((f) => f.status === "done").length;
@@ -785,6 +811,11 @@ export default function ImageOptimizer() {
   };
 
   const doneFiles = files.filter((f) => f.status === "done");
+  const totalPages = pageSize === "all" ? 1 : Math.max(1, Math.ceil(files.length / pageSize));
+  const displayedFiles = pageSize === "all"
+    ? files
+    : files.slice((currentPage - 1) * pageSize, currentPage * pageSize);
+  const isLargeList = files.length > 25;
 
   return (
     <div className="space-y-6">
@@ -799,7 +830,7 @@ export default function ImageOptimizer() {
           variant="outline"
           size="sm"
           onClick={() => window.location.reload()}
-          className="self-start sm:self-auto gap-2 text-xs font-medium border-border hover:bg-secondary transition-colors shadow-sm"
+          className="self-start sm:self-auto gap-2 text-xs font-medium border-border text-foreground hover:bg-primary hover:text-primary-foreground hover:border-primary transition-all shadow-sm"
           title="Reload Page"
         >
           <RefreshCw className="h-3.5 w-3.5" />
@@ -1039,111 +1070,298 @@ export default function ImageOptimizer() {
             sublabel="Batch upload supported • Supports almost all image formats"
           />
 
-          <AnimatePresence>
-            {files.map((f) => (
-              <motion.div
-                key={f.id}
-                initial={{ opacity: 0, y: 6 }}
-                animate={{ opacity: 1, y: 0 }}
-                exit={{ opacity: 0, y: -6 }}
-                transition={{ duration: 0.15 }}
-                style={{ contentVisibility: "auto", containIntrinsicSize: "0 88px" }}
-                className="rounded-xl border border-border bg-card shadow-card overflow-hidden"
-              >
-                <div className="flex items-center gap-4 p-4">
-                  <div className="h-16 w-16 rounded-lg bg-secondary flex items-center justify-center overflow-hidden flex-shrink-0">
-                    {f.preview || f.optimized ? (
-                      <img
-                        src={f.preview || f.optimized}
-                        alt={f.file.name}
-                        loading="lazy"
-                        decoding="async"
-                        className="h-full w-full object-cover"
-                        onError={() =>
-                          setFiles((prev) =>
-                            prev.map((item) => (item.id === f.id ? { ...item, preview: "" } : item))
-                          )
-                        }
-                      />
-                    ) : (
-                      <div className="text-[10px] font-bold text-muted-foreground uppercase">
-                        {f.file.name.split('.').pop()}
-                      </div>
-                    )}
-                  </div>
-                  <div className="flex-1 min-w-0">
-                    <p className="text-sm font-medium text-card-foreground truncate">
-                      {f.file.name}
-                    </p>
-                    <p className="text-xs text-muted-foreground">
-                      {f.status === "error" ? (
-                        <span className="text-destructive flex items-center gap-1">
-                          <AlertCircle className="h-3 w-3" />
-                          {f.errorMsg || "Error"}
-                        </span>
+          {files.length > 25 && (
+            <div className="flex flex-wrap items-center justify-between gap-2 p-2.5 rounded-xl bg-card border border-border shadow-sm text-xs">
+              <div className="flex items-center gap-2">
+                <span className="font-semibold text-foreground">Total: {files.length} images</span>
+                {pageSize !== "all" && (
+                  <span className="text-muted-foreground text-[11px]">
+                    (Showing {(currentPage - 1) * pageSize + 1}–{Math.min(currentPage * pageSize, files.length)})
+                  </span>
+                )}
+              </div>
+              <div className="flex items-center gap-1.5">
+                {pageSize !== "all" && totalPages > 1 && (
+                  <>
+                    <Button
+                      size="sm"
+                      variant="outline"
+                      className="h-7 px-2.5 text-xs"
+                      disabled={currentPage <= 1}
+                      onClick={() => setCurrentPage((p) => Math.max(1, p - 1))}
+                    >
+                      Prev
+                    </Button>
+                    <span className="px-2 font-mono text-xs">
+                      {currentPage} / {totalPages}
+                    </span>
+                    <Button
+                      size="sm"
+                      variant="outline"
+                      className="h-7 px-2.5 text-xs"
+                      disabled={currentPage >= totalPages}
+                      onClick={() => setCurrentPage((p) => Math.min(totalPages, p + 1))}
+                    >
+                      Next
+                    </Button>
+                  </>
+                )}
+                <Button
+                  size="sm"
+                  variant="ghost"
+                  className="h-7 px-2 text-xs text-muted-foreground hover:text-foreground"
+                  onClick={() => {
+                    setPageSize((prev) => (prev === "all" ? 30 : "all"));
+                    setCurrentPage(1);
+                  }}
+                >
+                  {pageSize === "all" ? "Paginate (30/page)" : "Show All"}
+                </Button>
+              </div>
+            </div>
+          )}
+
+          {isLargeList ? (
+            <div className="space-y-3">
+              {displayedFiles.map((f) => (
+                <div
+                  key={f.id}
+                  style={{ contentVisibility: "auto", containIntrinsicSize: "0 88px" }}
+                  className="rounded-xl border border-border bg-card shadow-card overflow-hidden"
+                >
+                  <div className="flex items-center gap-4 p-4">
+                    <div className="h-16 w-16 rounded-lg bg-secondary flex items-center justify-center overflow-hidden flex-shrink-0">
+                      {f.preview || f.optimized ? (
+                        <img
+                          src={f.preview || f.optimized}
+                          alt={f.file.name}
+                          loading="lazy"
+                          decoding="async"
+                          className="h-full w-full object-cover"
+                          onError={() =>
+                            setFiles((prev) =>
+                              prev.map((item) => (item.id === f.id ? { ...item, preview: "" } : item))
+                            )
+                          }
+                        />
                       ) : (
-                        <>
-                          Original: {formatSize(f.file.size)}
-                          {f.originalWidth && f.originalHeight ? (
-                            <span className="text-muted-foreground font-mono text-[11px] ml-1">
-                              ({f.originalWidth}×{f.originalHeight}px)
-                            </span>
-                          ) : null}
-                          {f.optimizedSize != null && (
-                            <>
-                              {" → "}
-                              <span className="text-green-500 font-medium">
-                                {formatSize(f.optimizedSize)}
+                        <div className="text-[10px] font-bold text-muted-foreground uppercase">
+                          {f.file.name.split('.').pop()}
+                        </div>
+                      )}
+                    </div>
+                    <div className="flex-1 min-w-0">
+                      <p className="text-sm font-medium text-card-foreground truncate">
+                        {f.file.name}
+                      </p>
+                      <p className="text-xs text-muted-foreground">
+                        {f.status === "error" ? (
+                          <span className="text-destructive flex items-center gap-1">
+                            <AlertCircle className="h-3 w-3" />
+                            {f.errorMsg || "Error"}
+                          </span>
+                        ) : (
+                          <>
+                            Original: {formatSize(f.file.size)}
+                            {f.originalWidth && f.originalHeight ? (
+                              <span className="text-muted-foreground font-mono text-[11px] ml-1">
+                                ({f.originalWidth}×{f.originalHeight}px)
                               </span>
-                              {" "}
-                              <span className="text-green-500">
-                                (−{Math.round((1 - f.optimizedSize / f.file.size) * 100)}%)
-                              </span>
-                              {f.optimizedWidth && f.optimizedHeight ? (
-                                <span className="text-primary font-mono text-[11px] ml-1 font-semibold">
-                                  ({f.optimizedWidth}×{f.optimizedHeight}px)
+                            ) : null}
+                            {f.optimizedSize != null && (
+                              <>
+                                {" → "}
+                                <span className="text-green-500 font-medium">
+                                  {formatSize(f.optimizedSize)}
                                 </span>
-                              ) : null}
-                            </>
-                          )}
+                                {" "}
+                                <span className="text-green-500">
+                                  (−{Math.round((1 - f.optimizedSize / f.file.size) * 100)}%)
+                                </span>
+                                {f.optimizedWidth && f.optimizedHeight ? (
+                                  <span className="text-primary font-mono text-[11px] ml-1 font-semibold">
+                                    ({f.optimizedWidth}×{f.optimizedHeight}px)
+                                  </span>
+                                ) : null}
+                              </>
+                            )}
+                          </>
+                        )}
+                      </p>
+                      {f.status === "processing" && (
+                        <div className="mt-2 h-1.5 w-full rounded-full bg-secondary overflow-hidden">
+                          <div className="h-full gradient-primary animate-pulse w-2/3 rounded-full" />
+                        </div>
+                      )}
+                    </div>
+                    <div className="flex items-center gap-1.5">
+                      {f.status === "done" && f.optimized && (
+                        <>
+                          <Button
+                            size="icon"
+                            variant="ghost"
+                            title="Re-optimize with current settings"
+                            disabled={processing}
+                            onClick={() => handleReoptimize(f.id)}
+                            className="text-muted-foreground hover:bg-primary hover:text-white transition-colors"
+                          >
+                            <RotateCcw className="h-4 w-4" />
+                          </Button>
+                          <Button size="icon" variant="ghost" onClick={() => downloadSingle(f)}>
+                            <Download className="h-4 w-4" />
+                          </Button>
                         </>
                       )}
-                    </p>
-                    {f.status === "processing" && (
-                      <div className="mt-2 h-1.5 w-full rounded-full bg-secondary overflow-hidden">
-                        <div className="h-full gradient-primary animate-pulse w-2/3 rounded-full" />
-                      </div>
-                    )}
-                  </div>
-                  <div className="flex items-center gap-1.5">
-                    {f.status === "done" && f.optimized && (
-                      <>
-                        <Button
-                          size="icon"
-                          variant="ghost"
-                          title="Re-optimize with current settings"
-                          disabled={processing}
-                          onClick={() => handleReoptimize(f.id)}
-                          className="text-muted-foreground hover:bg-primary hover:text-white transition-colors"
-                        >
-                          <RotateCcw className="h-4 w-4" />
-                        </Button>
-                        <Button size="icon" variant="ghost" onClick={() => downloadSingle(f)}>
-                          <Download className="h-4 w-4" />
-                        </Button>
-                      </>
-                    )}
-                    {f.status === "done" ? (
-                      <CheckCircle2 className="h-5 w-5 text-green-500" />
-                    ) : null}
-                    <Button size="icon" variant="ghost" onClick={() => removeFile(f.id)}>
-                      <Trash2 className="h-4 w-4 text-destructive" />
-                    </Button>
+                      {f.status === "done" ? (
+                        <CheckCircle2 className="h-5 w-5 text-green-500" />
+                      ) : null}
+                      <Button size="icon" variant="ghost" onClick={() => removeFile(f.id)}>
+                        <Trash2 className="h-4 w-4 text-destructive" />
+                      </Button>
+                    </div>
                   </div>
                 </div>
-              </motion.div>
-            ))}
-          </AnimatePresence>
+              ))}
+            </div>
+          ) : (
+            <AnimatePresence>
+              {displayedFiles.map((f) => (
+                <motion.div
+                  key={f.id}
+                  initial={{ opacity: 0, y: 6 }}
+                  animate={{ opacity: 1, y: 0 }}
+                  exit={{ opacity: 0, y: -6 }}
+                  transition={{ duration: 0.15 }}
+                  style={{ contentVisibility: "auto", containIntrinsicSize: "0 88px" }}
+                  className="rounded-xl border border-border bg-card shadow-card overflow-hidden"
+                >
+                  <div className="flex items-center gap-4 p-4">
+                    <div className="h-16 w-16 rounded-lg bg-secondary flex items-center justify-center overflow-hidden flex-shrink-0">
+                      {f.preview || f.optimized ? (
+                        <img
+                          src={f.preview || f.optimized}
+                          alt={f.file.name}
+                          loading="lazy"
+                          decoding="async"
+                          className="h-full w-full object-cover"
+                          onError={() =>
+                            setFiles((prev) =>
+                              prev.map((item) => (item.id === f.id ? { ...item, preview: "" } : item))
+                            )
+                          }
+                        />
+                      ) : (
+                        <div className="text-[10px] font-bold text-muted-foreground uppercase">
+                          {f.file.name.split('.').pop()}
+                        </div>
+                      )}
+                    </div>
+                    <div className="flex-1 min-w-0">
+                      <p className="text-sm font-medium text-card-foreground truncate">
+                        {f.file.name}
+                      </p>
+                      <p className="text-xs text-muted-foreground">
+                        {f.status === "error" ? (
+                          <span className="text-destructive flex items-center gap-1">
+                            <AlertCircle className="h-3 w-3" />
+                            {f.errorMsg || "Error"}
+                          </span>
+                        ) : (
+                          <>
+                            Original: {formatSize(f.file.size)}
+                            {f.originalWidth && f.originalHeight ? (
+                              <span className="text-muted-foreground font-mono text-[11px] ml-1">
+                                ({f.originalWidth}×{f.originalHeight}px)
+                              </span>
+                            ) : null}
+                            {f.optimizedSize != null && (
+                              <>
+                                {" → "}
+                                <span className="text-green-500 font-medium">
+                                  {formatSize(f.optimizedSize)}
+                                </span>
+                                {" "}
+                                <span className="text-green-500">
+                                  (−{Math.round((1 - f.optimizedSize / f.file.size) * 100)}%)
+                                </span>
+                                {f.optimizedWidth && f.optimizedHeight ? (
+                                  <span className="text-primary font-mono text-[11px] ml-1 font-semibold">
+                                    ({f.optimizedWidth}×{f.optimizedHeight}px)
+                                  </span>
+                                ) : null}
+                              </>
+                            )}
+                          </>
+                        )}
+                      </p>
+                      {f.status === "processing" && (
+                        <div className="mt-2 h-1.5 w-full rounded-full bg-secondary overflow-hidden">
+                          <div className="h-full gradient-primary animate-pulse w-2/3 rounded-full" />
+                        </div>
+                      )}
+                    </div>
+                    <div className="flex items-center gap-1.5">
+                      {f.status === "done" && f.optimized && (
+                        <>
+                          <Button
+                            size="icon"
+                            variant="ghost"
+                            title="Re-optimize with current settings"
+                            disabled={processing}
+                            onClick={() => handleReoptimize(f.id)}
+                            className="text-muted-foreground hover:bg-primary hover:text-white transition-colors"
+                          >
+                            <RotateCcw className="h-4 w-4" />
+                          </Button>
+                          <Button size="icon" variant="ghost" onClick={() => downloadSingle(f)}>
+                            <Download className="h-4 w-4" />
+                          </Button>
+                        </>
+                      )}
+                      {f.status === "done" ? (
+                        <CheckCircle2 className="h-5 w-5 text-green-500" />
+                      ) : null}
+                      <Button size="icon" variant="ghost" onClick={() => removeFile(f.id)}>
+                        <Trash2 className="h-4 w-4 text-destructive" />
+                      </Button>
+                    </div>
+                  </div>
+                </motion.div>
+              ))}
+            </AnimatePresence>
+          )}
+
+          {files.length > 25 && pageSize !== "all" && totalPages > 1 && (
+            <div className="flex items-center justify-center gap-2 pt-2">
+              <Button
+                size="sm"
+                variant="outline"
+                className="h-8 px-3 text-xs"
+                disabled={currentPage <= 1}
+                onClick={() => {
+                  setCurrentPage((p) => Math.max(1, p - 1));
+                  window.scrollTo({ top: 300, behavior: "smooth" });
+                }}
+              >
+                Previous Page
+              </Button>
+              <span className="font-mono text-xs px-2 text-muted-foreground">
+                Page {currentPage} of {totalPages}
+              </span>
+              <Button
+                size="sm"
+                variant="outline"
+                className="h-8 px-3 text-xs"
+                disabled={currentPage >= totalPages}
+                onClick={() => {
+                  setCurrentPage((p) => Math.min(totalPages, p + 1));
+                  window.scrollTo({ top: 300, behavior: "smooth" });
+                }}
+              >
+                Next Page
+              </Button>
+            </div>
+          )}
         </div>
       </div>
     </div>

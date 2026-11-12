@@ -18,7 +18,7 @@ export async function fastGetImageDimensions(
   file: File | Blob
 ): Promise<{ width?: number; height?: number }> {
   try {
-    const sliceSize = Math.min(file.size, 131072); // first 128 KB is plenty for headers & EXIF
+    const sliceSize = Math.min(file.size, 262144); // 256 KB ensures large EXIF & ICC profiles are covered
     const buffer = await file.slice(0, sliceSize).arrayBuffer();
     const bytes = new Uint8Array(buffer);
     const view = new DataView(buffer);
