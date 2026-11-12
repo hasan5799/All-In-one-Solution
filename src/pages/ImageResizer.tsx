@@ -1,6 +1,6 @@
 import { useState, useCallback } from "react";
 import { motion, AnimatePresence } from "framer-motion";
-import { Download, Trash2, ArrowRight, Package, Maximize2, CheckCircle2, Loader2, Link as LinkIcon, Unlink } from "lucide-react";
+import { Download, Trash2, ArrowRight, Package, Maximize2, CheckCircle2, Loader2, Link as LinkIcon, Unlink, RefreshCw } from "lucide-react";
 import { DropZone } from "@/components/DropZone";
 import { Button } from "@/components/ui/button";
 import { Slider } from "@/components/ui/slider";
@@ -10,6 +10,7 @@ import JSZip from "jszip";
 import { saveAs } from "file-saver";
 import { useHistory } from "@/contexts/HistoryContext";
 import { consumeDownloadUsage, consumeServiceUsage } from "@/lib/memberLimits";
+import { createImageThumbnail, mapConcurrently } from "@/lib/imageThumbnail";
 
 interface ImageFile {
     id: string;
@@ -33,33 +34,33 @@ export default function ImageResizer() {
     const [outputFormat, setOutputFormat] = useState("webp");
     const [processing, setProcessing] = useState(false);
 
-    const handleFiles = useCallback((newFiles: File[]) => {
+    const handleFiles = useCallback(async (newFiles: File[]) => {
         const imageFiles = newFiles.filter((f) => f.type.startsWith("image/"));
         if (imageFiles.length < newFiles.length) {
             toast.warning("Some files skipped (non-image format)");
         }
 
-        imageFiles.forEach(file => {
-            const img = new Image();
-            img.onload = () => {
-                const newFile: ImageFile = {
-                    id: crypto.randomUUID(),
-                    file: file,
-                    preview: URL.createObjectURL(file),
-                    originalWidth: img.naturalWidth,
-                    originalHeight: img.naturalHeight,
-                    status: "pending",
-                };
-                setFiles((prev) => [...prev, newFile]);
-                // Set initial width/height from the first image dropped
-                if (files.length === 0) {
-                    setWidth(img.naturalWidth);
-                    setHeight(img.naturalHeight);
-                }
+        const mapped = await mapConcurrently(imageFiles, 3, async (file) => {
+            const thumb = await createImageThumbnail(file, 160);
+            return {
+                id: crypto.randomUUID(),
+                file,
+                preview: thumb.preview,
+                originalWidth: thumb.width || 0,
+                originalHeight: thumb.height || 0,
+                status: "pending" as const,
             };
-            img.src = URL.createObjectURL(file);
         });
-    }, [files.length]);
+
+        setFiles((prev) => {
+            const combined = [...prev, ...mapped];
+            if (prev.length === 0 && mapped.length > 0 && mapped[0].originalWidth > 0) {
+                setWidth(mapped[0].originalWidth);
+                setHeight(mapped[0].originalHeight);
+            }
+            return combined;
+        });
+    }, []);
 
     const handleWidthChange = (val: number) => {
         setWidth(val);
@@ -200,11 +201,23 @@ export default function ImageResizer() {
 
     return (
         <div className="space-y-6">
-            <div>
-                <h1 className="text-2xl font-bold text-foreground">Image Resizer</h1>
-                <p className="text-sm text-muted-foreground mt-1">
-                    Resize multiple images at once with precision
-                </p>
+            <div className="flex flex-col sm:flex-row sm:items-center sm:justify-between gap-4">
+                <div>
+                    <h1 className="text-2xl font-bold text-foreground">Image Resizer</h1>
+                    <p className="text-sm text-muted-foreground mt-1">
+                        Resize multiple images at once with precision
+                    </p>
+                </div>
+                <Button
+                    variant="outline"
+                    size="sm"
+                    onClick={() => window.location.reload()}
+                    className="self-start sm:self-auto gap-2 text-xs font-medium border-border hover:bg-secondary transition-colors shadow-sm"
+                    title="Reload Page"
+                >
+                    <RefreshCw className="h-3.5 w-3.5" />
+                    Reload Page
+                </Button>
             </div>
 
             <div className="grid grid-cols-1 lg:grid-cols-3 gap-6">
@@ -314,15 +327,19 @@ export default function ImageResizer() {
                             {files.map((f) => (
                                 <motion.div
                                     key={f.id}
-                                    initial={{ opacity: 0, scale: 0.95 }}
+                                    initial={{ opacity: 0, scale: 0.98 }}
                                     animate={{ opacity: 1, scale: 1 }}
-                                    exit={{ opacity: 0, scale: 0.95 }}
+                                    exit={{ opacity: 0, scale: 0.98 }}
+                                    transition={{ duration: 0.15 }}
+                                    style={{ contentVisibility: "auto", containIntrinsicSize: "0 88px" }}
                                     className="rounded-xl border border-border bg-card shadow-card overflow-hidden"
                                 >
                                     <div className="flex items-center gap-4 p-4">
                                         <img
-                                            src={f.resized || f.preview}
+                                            src={f.preview || f.resized}
                                             alt={f.file.name}
+                                            loading="lazy"
+                                            decoding="async"
                                             className="h-14 w-14 rounded-lg object-cover flex-shrink-0 bg-secondary"
                                         />
                                         <div className="flex-1 min-w-0">

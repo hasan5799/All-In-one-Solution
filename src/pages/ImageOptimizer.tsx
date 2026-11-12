@@ -1,6 +1,6 @@
 import { useState, useCallback, useEffect, useRef } from "react";
 import { motion, AnimatePresence } from "framer-motion";
-import { Download, Trash2, ArrowRight, Package, Loader2, AlertCircle, CheckCircle2, RotateCcw } from "lucide-react";
+import { Download, Trash2, ArrowRight, Package, Loader2, AlertCircle, CheckCircle2, RotateCcw, RefreshCw } from "lucide-react";
 import { DropZone } from "@/components/DropZone";
 import { Button } from "@/components/ui/button";
 import { Slider } from "@/components/ui/slider";
@@ -18,6 +18,7 @@ import {
   shouldUseSupabaseTempUpload,
   uploadTempFileToSupabase,
 } from "@/lib/supabaseTempStorage";
+import { createImageThumbnail, mapConcurrently } from "@/lib/imageThumbnail";
 
 interface ImageFile {
   id: string;
@@ -193,28 +194,27 @@ export default function ImageOptimizer() {
     const userId = getCurrentUserId();
     let supabaseUploadFailedCount = 0;
 
-    const mapped: ImageFile[] = await Promise.all(imageFiles.map(async (f) => {
+    const mapped: ImageFile[] = await mapConcurrently(imageFiles, 3, async (f) => {
       const fileId = crypto.randomUUID();
       const lowerName = f.name.toLowerCase();
       const ext = `.${lowerName.split(".").pop() || ""}`;
       const isPsdOrTiff = [".psd", ".tiff", ".tif"].includes(ext);
-      const isFfmpegExt = FFMPEG_REQUIRED_EXTENSIONS.includes(ext);
-      const isHeifSignature = await looksLikeHeifFamily(f);
-      // Try browser decode for everything EXCEPT PSD/TIFF which usually require FFmpeg
-      const browserDecodable = !isPsdOrTiff ? await canBrowserDecodeImage(f) : false;
-      let preview = browserDecodable ? URL.createObjectURL(f) : "";
+
+      let preview = "";
       let originalWidth: number | undefined;
       let originalHeight: number | undefined;
 
-      if (browserDecodable) {
+      // Extract dimensions and generate a lightweight 160px thumbnail (WebP)
+      // to avoid storing huge 20-50 Megapixel uncompressed bitmaps in GPU memory
+      if (!isPsdOrTiff) {
         try {
-          const bitmap = await createImageBitmap(f);
-          if (bitmap.width > 0 && bitmap.height > 0) {
-            originalWidth = bitmap.width;
-            originalHeight = bitmap.height;
-          }
-          bitmap.close();
-        } catch { /* fallback */ }
+          const thumb = await createImageThumbnail(f, 160);
+          preview = thumb.preview;
+          originalWidth = thumb.width;
+          originalHeight = thumb.height;
+        } catch {
+          // fallback gracefully
+        }
       }
 
       let supabasePath: string | undefined;
@@ -243,7 +243,7 @@ export default function ImageOptimizer() {
         supabaseSignedUrl,
         status: "pending",
       };
-    }));
+    });
 
     if (shouldUseSupabase && supabaseUploadFailedCount > 0) {
       toast.warning(`${supabaseUploadFailedCount} file(s) could not be uploaded to Supabase, local fallback used`);
@@ -783,11 +783,23 @@ export default function ImageOptimizer() {
 
   return (
     <div className="space-y-6">
-      <div>
-        <h1 className="text-2xl font-bold text-foreground">Image Optimizer</h1>
-        <p className="text-sm text-muted-foreground mt-1">
-          Compress and convert images — Supports PSD, JPG, PNG, WebP, HEIC & more
-        </p>
+      <div className="flex flex-col sm:flex-row sm:items-center sm:justify-between gap-4">
+        <div>
+          <h1 className="text-2xl font-bold text-foreground">Image Optimizer</h1>
+          <p className="text-sm text-muted-foreground mt-1">
+            Compress and convert images — Supports PSD, JPG, PNG, WebP, HEIC & more
+          </p>
+        </div>
+        <Button
+          variant="outline"
+          size="sm"
+          onClick={() => window.location.reload()}
+          className="self-start sm:self-auto gap-2 text-xs font-medium border-border hover:bg-secondary transition-colors shadow-sm"
+          title="Reload Page"
+        >
+          <RefreshCw className="h-3.5 w-3.5" />
+          Reload Page
+        </Button>
       </div>
 
       <div className="grid grid-cols-1 lg:grid-cols-3 gap-6">
@@ -955,17 +967,21 @@ export default function ImageOptimizer() {
             {files.map((f) => (
               <motion.div
                 key={f.id}
-                initial={{ opacity: 0, height: 0 }}
-                animate={{ opacity: 1, height: "auto" }}
-                exit={{ opacity: 0, height: 0 }}
+                initial={{ opacity: 0, y: 6 }}
+                animate={{ opacity: 1, y: 0 }}
+                exit={{ opacity: 0, y: -6 }}
+                transition={{ duration: 0.15 }}
+                style={{ contentVisibility: "auto", containIntrinsicSize: "0 88px" }}
                 className="rounded-xl border border-border bg-card shadow-card overflow-hidden"
               >
                 <div className="flex items-center gap-4 p-4">
                   <div className="h-16 w-16 rounded-lg bg-secondary flex items-center justify-center overflow-hidden flex-shrink-0">
-                    {f.preview ? (
+                    {f.preview || f.optimized ? (
                       <img
-                        src={f.optimized || f.preview}
+                        src={f.preview || f.optimized}
                         alt={f.file.name}
+                        loading="lazy"
+                        decoding="async"
                         className="h-full w-full object-cover"
                         onError={() =>
                           setFiles((prev) =>
