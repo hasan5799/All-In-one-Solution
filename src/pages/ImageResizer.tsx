@@ -305,10 +305,10 @@ export default function ImageResizer() {
                             )}
                         </Button>
 
-                        {files.filter(f => f.status === "done").length > 1 && (
+                        {files.length > 1 && files.filter(f => f.status === "done").length > 1 && !processing && !files.some((f) => f.status === "pending" || f.status === "processing") && (
                             <Button variant="outline" onClick={downloadAll} className="w-full">
                                 <Package className="mr-2 h-4 w-4" />
-                                Download ZIP
+                                Download ZIP ({files.filter(f => f.status === "done").length})
                             </Button>
                         )}
                     </div>

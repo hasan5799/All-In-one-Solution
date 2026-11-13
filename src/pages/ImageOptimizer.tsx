@@ -1116,10 +1116,10 @@ export default function ImageOptimizer() {
                 </Button>
               )}
 
-              {doneFiles.length > 1 && (
+              {files.length > 1 && doneFiles.length > 1 && !processing && !files.some((f) => f.status === "pending" || f.status === "processing") && (
                 <Button variant="outline" onClick={downloadAll} className="w-full">
                   <Package className="mr-2 h-4 w-4" />
-                  Download ZIP
+                  Download ZIP ({doneFiles.length})
                 </Button>
               )}
             </div>
